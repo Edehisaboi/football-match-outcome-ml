@@ -2,8 +2,9 @@
 
 This project is a standalone machine learning pipeline for predicting football
 match outcomes from historical match statistics. It focuses on practical ML
-craft: data cleaning, leakage-safe feature engineering, temporal train/test
-evaluation, model diagnostics, and a reusable prediction artifact.
+craft: data cleaning, leakage-safe feature engineering, temporal
+train/validation/test evaluation, probability calibration, threshold tuning,
+model diagnostics, and a reusable prediction artifact.
 
 The model does not use betting odds. It learns only from scraped match data and
 pre-match team history.
@@ -24,8 +25,15 @@ The final decision layer returns one of:
 - `away win either half`
 - `skip`
 
-`skip` is intentional. The pipeline abstains when probabilities do not clear
-the hardcoded confidence thresholds.
+`skip` is intentional. The pipeline abstains when calibrated probabilities do
+not clear validation-tuned thresholds. In the current saved notebook output,
+the selected thresholds are:
+
+| Threshold | Value |
+|---|---:|
+| Minimum outright probability | 0.70 |
+| Minimum outright margin | 0.10 |
+| Minimum either-half probability | 0.75 |
 
 ## Data
 
@@ -55,67 +63,86 @@ datasets/rich_stats/league_matches_stats.csv
 ```mermaid
 flowchart LR
     A["Flashscore match stats"] --> B["Clean required columns"]
-    B --> C["Remove teams with < 10 matches"]
-    C --> D["Build rolling pre-match features"]
-    D --> E["Temporal train/test split"]
-    E --> F["Train XGBoost models"]
-    F --> G["Evaluate accuracy, confusion, precision, coverage"]
-    G --> H["Save reusable joblib artifact"]
+    B --> C["Remove low-history teams"]
+    C --> D["Build leakage-safe rolling features"]
+    D --> E["Temporal train/validation/test split"]
+    E --> F["Train regularised XGBoost models"]
+    F --> G["Platt-calibrate probabilities"]
+    G --> H["Tune decision thresholds on validation"]
+    H --> I["Score held-out test window"]
+    I --> J["Save reusable joblib artifact"]
 ```
 
 Key implementation choices:
 
 - Multi-competition dataset rather than a Premier League-only model
-- Temporal split so future fixtures are tested after past fixtures
+- Three-way temporal split: training before 2025-07-01, validation before
+  2026-01-01, and held-out test fixtures from 2026-01-01 onward
+- Validation window used for early stopping, the small hyperparameter sweep,
+  Platt calibration, and decision-threshold tuning
+- Test window scored once at the end for the final read-out
 - Rolling features use previous matches only, reducing data leakage
-- Low-history teams are filtered out before modeling
+- Expected-goals and head-to-head features are missing-tolerant, so older rows
+  and teams with no prior meeting can still be modeled
 - Unknown teams are rejected during fixture prediction
 - Odds are excluded so the model remains a standalone prediction system
 
 ## Features
 
-The model uses sixteen pre-match features, including:
+The current model uses 30 pre-match features: 22 core features that must be
+present and 8 missing-tolerant features handled natively by XGBoost.
 
-- Elo difference
-- Recent home and away points form
-- Recent goals scored and conceded
-- Attack-vs-defence form gaps
-- Shots-on-target form
-- Corners form
-- Rest-days difference
-- Shot accuracy, possession, fouls, and conceded-shot pressure
+Feature groups include:
+
+- Elo difference plus both teams' absolute Elo levels
+- Short-form points, goals, goal difference, attack-vs-defence, shots on target,
+  conceded shot pressure, shot accuracy, corners, possession, and fouls
+- Venue form for home and away points
+- Medium-form points and goal-difference gaps over a longer horizon
+- Rest-days difference, capped so off-season gaps do not dominate
+- European cup context
+- Head-to-head match count, home-team win rate, and home-team goal difference
+- Expected-goals form and finishing luck, where xG data is available
 
 ## Evaluation
 
-The notebook includes a compact evaluation section with:
+The notebook evaluates probability quality, class behavior, calibration,
+feature importance, and the tuned decision layer.
 
-- Train vs test accuracy table
-- Train/test generalisation gap chart
-- Row-normalised 1X2 confusion matrix
-- Class-level precision, recall, and F1 metrics
-- Either-half positive-class metrics
-- 1X2 feature-importance chart
-- Decision precision and coverage charts
+Current saved notebook output:
 
-Latest test run:
+| Split | Rows | Date range |
+|---|---:|---|
+| Training | 10,072 | 2020-11-05 to 2025-05-31 |
+| Validation | 1,251 | 2025-07-08 to 2025-12-30 |
+| Test | 1,152 | 2026-01-01 to 2026-05-30 |
 
-| Target | Test accuracy |
-|---|---:|
-| 1X2 match result | 48.88% |
-| Home wins either half | 62.00% |
-| Away wins either half | 57.08% |
+1X2 test comparison:
 
-Latest decision layer:
-
-| Decision | Picks | Precision |
+| Model | Accuracy | Log loss |
 |---|---:|---:|
-| home | 249 | 66.67% |
-| away | 101 | 53.47% |
-| home win either half | 161 | 60.87% |
-| away win either half | 116 | 55.17% |
-| combined slate | 627 | 60.93% |
+| Class frequency | 43.92% | 1.0708 |
+| Elo-only logistic regression | 50.35% | 1.0170 |
+| XGBoost raw | 50.52% | 1.0088 |
+| XGBoost calibrated | 51.13% | 1.0165 |
 
-Skip rate: 45.85%
+Either-half test metrics using calibrated probabilities with a 0.5 cut:
+
+| Target | Accuracy | Log loss |
+|---|---:|---:|
+| Home wins either half | 63.89% | 0.6357 |
+| Away wins either half | 61.89% | 0.6732 |
+
+Decision layer on the test set with validation-tuned thresholds:
+
+| Decision | Picks | Coverage | Precision |
+|---|---:|---:|---:|
+| home | 204 | 17.7% | 68.6% |
+| away | 13 | 1.1% | 76.9% |
+| home win either half | 59 | 5.1% | 72.9% |
+| away win either half | 28 | 2.4% | 67.9% |
+| combined slate | 304 | 26.4% | 69.7% |
+| skip | 848 | 73.6% | n/a |
 
 ## How To Run
 
@@ -146,13 +173,18 @@ model fitting. It shows the full loop:
 - handling low-history entities
 - designing leakage-aware rolling features
 - training multiple target types
-- evaluating overfitting and class behavior
-- converting probabilities into usable decisions
+- checking baselines, log loss, calibration, and class behavior
+- converting calibrated probabilities into usable decisions
 - saving and reloading a production-style artifact
 
 ## Limitations And Next Steps
 
-The current model still shows a clear train/test gap, so the next improvements
-would be probability calibration, rolling backtests across multiple seasons,
-target-specific threshold review, and more conservative XGBoost regularisation.
-The project should not be treated as betting advice.
+The current implementation already includes probability calibration and
+validation-tuned decision thresholds. Remaining limitations are mostly about
+generalisation and coverage: the saved test metrics show weak draw recall, the
+decision layer is intentionally selective, and xG coverage starts in 2023.
+
+Useful next work would include rolling backtests across multiple seasons,
+draw-aware modeling or target design, competition-specific calibration checks,
+and a stricter review of threshold stability. The project should not be treated
+as betting advice.
