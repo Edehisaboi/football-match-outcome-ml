@@ -6,3 +6,7 @@ jupyter
 matplotlib
 seaborn
 xgboost
+scipy
+statsmodels
+
+ipython
